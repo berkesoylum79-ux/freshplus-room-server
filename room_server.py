@@ -64,10 +64,10 @@ def gen_room_id():
 
 
 def room_info(room):
-    """Odanın public bilgisini döndür."""
     return {
         "room_id":  room["room_id"],
         "title":    room["title"],
+        "url":      room["url"],
         "poster":   room["poster"],
         "host":     room["host"],
         "users":    list(room["users"].keys()),

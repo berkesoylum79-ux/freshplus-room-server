@@ -259,6 +259,7 @@ def on_seek(data):
     print(f"[Sync] SEEK @{pos:.1f}s | Oda: {room_id}")
 
 
+
 @socketio.on("sync_position")
 def on_sync_position(data):
     """Host her 5sn'de pozisyonunu gönderir."""
@@ -281,6 +282,19 @@ def on_sync_position(data):
                 "position": pos,
                 "state":    room["state"],
             }, to=udata["sid"])
+
+
+@socketio.on("close_room")
+def on_close_room(data):
+    sid = request.sid
+    if sid not in sid_map: return
+    room_id, username = sid_map[sid]
+    room = rooms.get(room_id)
+    if not room: return
+    if username != room["host"]: return
+    emit("room_closed", {"by": username}, to=room_id)
+    del rooms[room_id]
+    print(f"[Room] Kapatildi: {room_id} | Host: {username}")
 
 
 @socketio.on("chat")

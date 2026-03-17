@@ -334,4 +334,4 @@ if __name__ == "__main__":
     print(f"  FreshPlus Room Server")
     print(f"  → http://localhost:{port}")
     print(f"{'='*50}\n")
-    socketio.run(app, host="0.0.0.0", port=port, debug=False)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)

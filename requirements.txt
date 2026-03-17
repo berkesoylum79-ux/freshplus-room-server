@@ -1,5 +1,4 @@
 flask==3.0.0
 flask-socketio==5.3.6
 flask-cors==4.0.0
-gevent==24.2.1
-gevent-websocket==0.10.1
+simple-websocket==1.0.0

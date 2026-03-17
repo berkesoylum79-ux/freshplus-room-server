@@ -9,6 +9,9 @@ Gereksinimler:
     pip install flask flask-socketio flask-cors eventlet
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import random
 import string
@@ -17,6 +20,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS
+
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "freshplus-room-secret-2024")

@@ -1,5 +1,5 @@
-import eventlet
-eventlet.monkey_patch()
+from gevent import monkey
+monkey.patch_all()
 
 import os
 import random
@@ -17,7 +17,7 @@ CORS(app, origins="*")
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="threading",
+    async_mode="gevent",
     ping_timeout=60,
     ping_interval=25,
 )

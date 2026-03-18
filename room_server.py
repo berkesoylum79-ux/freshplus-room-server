@@ -256,6 +256,20 @@ def on_seek(data):
     print(f"[Sync] SEEK @{pos:.1f}s | Oda: {room_id}")
 
 
+@socketio.on("poke")
+def on_poke(data):
+    sid = request.sid
+    if sid not in sid_map: return
+    room_id, username = sid_map[sid]
+    room = rooms.get(room_id)
+    if not room: return
+    target = data.get("target")
+    if not target or target not in room["users"]: return
+    target_sid = room["users"][target]["sid"]
+    emit("poked", {"by": username}, to=target_sid)
+    print(f"[Poke] {username} -> {target}")
+
+
 
 @socketio.on("sync_position")
 def on_sync_position(data):

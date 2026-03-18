@@ -138,18 +138,14 @@ def on_disconnect():
         room = rooms.get(room_id)
         if room and username in room["users"]:
             del room["users"][username]
-            print(f"[WS] Ayrıldı: {username} | Oda: {room_id}")
-
-            # Odaya bildir
+            print(f"[WS] Ayrildi: {username} | Oda: {room_id}")
             emit("user_left", {
                 "username": username,
-                "users":    list(room["users"].keys()),
+                "users": list(room["users"].keys()),
             }, to=room_id)
-
-            # Oda boşaldıysa sil
             if not room["users"]:
                 del rooms[room_id]
-                print(f"[Room] Silindi (boş): {room_id}")
+                print(f"[Room] Silindi (bos): {room_id}")
 
 
 @socketio.on("join")

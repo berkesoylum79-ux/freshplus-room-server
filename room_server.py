@@ -113,13 +113,20 @@ def get_room(room_id):
 def check_username(room_id):
     room = rooms.get(room_id.upper())
     if not room:
-        return jsonify({"ok": False, "error": "Oda bulunamadı"}), 404
+        return jsonify({"ok": False, "error": "Oda bulunamadi"}), 404
     data = request.get_json(force=True, silent=True) or {}
     username = data.get("username", "").strip()
     if not username:
-        return jsonify({"ok": False, "error": "Kullanıcı adı gerekli"}), 400
+        return jsonify({"ok": False, "error": "Kullanici adi gerekli"}), 400
     if username in room["users"]:
-        return jsonify({"ok": False, "error": "Bu kullanıcı adı alınmış"}), 409
+        # Eski baglanti hala var mi kontrol et
+        old_sid = room["users"][username].get("sid")
+        if old_sid and old_sid in sid_map:
+            # Hala bagli, izin verme
+            return jsonify({"ok": False, "error": "Bu kullanici adi alinmis"}), 409
+        else:
+            # Eski baglanti kopmus, temizle
+            del room["users"][username]
     return jsonify({"ok": True})
 
 

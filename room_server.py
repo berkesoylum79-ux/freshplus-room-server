@@ -157,9 +157,6 @@ def on_disconnect():
 
 @socketio.on("join")
 def on_join(data):
-    """
-    data: {room_id, username}
-    """
     room_id  = (data.get("room_id") or "").strip().upper()
     username = (data.get("username") or "").strip()
 
@@ -169,15 +166,17 @@ def on_join(data):
 
     room = rooms.get(room_id)
     if not room:
-        emit("error", {"msg": "Oda bulunamadı"})
+        emit("error", {"msg": "Oda bulunamadi"})
         return
 
-    # Aynı kullanıcı adı kontrolü
-    if username in room["users"] and room["users"][username]["sid"] != request.sid:
-        emit("error", {"msg": "Bu kullanıcı adı alınmış"})
-        return
+    # Eski baglanti varsa temizle
+    if username in room["users"]:
+        old_sid = room["users"][username].get("sid")
+        if old_sid and old_sid in sid_map:
+            del sid_map[old_sid]
+        del room["users"][username]
 
-    # Odaya kayıt
+    # Odaya kayit
     room["users"][username] = {
         "sid":       request.sid,
         "joined_at": time.time(),
@@ -185,9 +184,8 @@ def on_join(data):
     sid_map[request.sid] = (room_id, username)
     join_room(room_id)
 
-    print(f"[WS] Katıldı: {username} | Oda: {room_id}")
+    print(f"[WS] Katildi: {username} | Oda: {room_id}")
 
-    # Katılan kişiye oda bilgisi + son mesajlar
     emit("joined", {
         "room":     room_info(room),
         "url":      room["url"],
@@ -195,12 +193,10 @@ def on_join(data):
         "is_host":  username == room["host"],
     })
 
-    # Odadakilere bildir
     emit("user_joined", {
         "username": username,
         "users":    list(room["users"].keys()),
     }, to=room_id)
-
 
 @socketio.on("play")
 def on_play(data):

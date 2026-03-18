@@ -318,17 +318,22 @@ def on_chat(data):
 
 @socketio.on("request_sync")
 def on_request_sync(data):
-    """Yeni katılan kişi sync ister."""
     sid = request.sid
     if sid not in sid_map: return
     room_id, username = sid_map[sid]
     room = rooms.get(room_id)
     if not room: return
 
-    # Host'a sync isteği gönder
     host_data = room["users"].get(room["host"])
     if host_data:
+        # Host'a sync isteği gönder
         emit("sync_requested", {"by": username}, to=host_data["sid"])
+    else:
+        # Host yoksa room state'inden gönder
+        emit("sync_position", {
+            "position": room["position"],
+            "state":    room["state"],
+        }, to=sid)
 
 
 if __name__ == "__main__":

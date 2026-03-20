@@ -1,5 +1,5 @@
-import gevent.monkey
-gevent.monkey.patch_all()
+import eventlet
+eventlet.monkey_patch()
 import os
 import random
 import string
@@ -16,10 +16,12 @@ CORS(app, origins="*")
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="gevent",
+    async_mode="eventlet",
     ping_timeout=60,
-    ping_interval=10,
+    ping_interval=25,
     max_http_buffer_size=1e6,
+    logger=False,
+    engineio_logger=False,
 )
 
 # ── In-memory store ───────────────────────────────────────────────────────────

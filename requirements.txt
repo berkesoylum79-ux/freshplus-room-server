@@ -1,6 +1,6 @@
 flask
 flask-socketio
 flask-cors
-gevent
-gevent-websocket
-gunicorn[gevent]
+eventlet==0.33.3
+gunicorn
+requests

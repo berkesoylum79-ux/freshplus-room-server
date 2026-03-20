@@ -30,13 +30,23 @@ rooms   = {}   # room_id -> room dict
 sid_map = {}   # sid -> (room_id, username)
 
 # ── Spam koruması ─────────────────────────────────────────────────────────────
-_last_event  = {}   # sid -> {event_name: timestamp}
-SPAM_LIMITS  = {"seek": 0.15, "play": 0.1, "pause": 0.1}
+_last_event = {}
+SPAM_LIMITS = {
+    "seek":               0.08,   # max 12 Hz
+    "play":               0.08,
+    "pause":              0.08,
+    "position_heartbeat": 0.45,   # max ~2 Hz
+}
+
+# ── Sync döngüsü hızı ─────────────────────────────────────────────────────────
+# 5 Hz = 200ms.  İstemci 100ms dead-zone ile çalışır → en fazla 100ms steady drift.
+SYNC_INTERVAL = 0.2
+
 
 def _check_spam(sid, event_name):
-    now   = time.time()
+    now    = time.time()
     bucket = _last_event.setdefault(sid, {})
-    limit  = SPAM_LIMITS.get(event_name, 0.1)
+    limit  = SPAM_LIMITS.get(event_name, 0.08)
     if now - bucket.get(event_name, 0) < limit:
         return False
     bucket[event_name] = now
@@ -51,76 +61,82 @@ def _gen_room_id():
 
 
 def _room_info(room):
+    """Oda bilgilerini özet dict olarak döndür."""
     return {
-        "room_id":          room["room_id"],
-        "title":            room["title"],
-        "url":              room["url"],
-        "poster":           room["poster"],
-        "host":             room["host"],
-        "users":            list(room["users"].keys()),
-        "state":            room["state"],
-        "position":         room["position"],
-        "position_updated": room["position_updated"],
-        "seq":              room["seq"],
+        "room_id":      room["room_id"],
+        "title":        room["title"],
+        "url":          room["url"],
+        "poster":       room["poster"],
+        "host":         room["host"],
+        "users":        list(room["users"].keys()),
+        "state":        room["state"],
+        "ref_position": room["ref_position"],   # Referans pozisyon (saniye)
+        "ref_time":     room["ref_time"],        # Referans zaman (unix ts, server)
+        "seq":          room["seq"],
     }
 
 
 def _current_position(room, now=None):
     """
-    Odanın anlık pozisyonunu döndürür.
-    now parametresi verilerek timestamp tutarsızlığı (S-9) önlenir:
-    hem server_time hem position aynı 'now' ile hesaplanır.
+    Referans noktasından anlık pozisyonu hesapla.
+
+    Tasarım: Sunucu pozisyonu hiçbir zaman 'oynatarak hesaplamaz'.
+    Bunun yerine (ref_position, ref_time) çiftini saklar.
+    ref_time anından bu yana geçen süre kadar ilerleme varsayılır (state=playing ise).
+    İstemci de aynı formülü kullanır — böylece ikisi her zaman aynı noktada buluşur.
     """
     if now is None:
         now = time.time()
-    pos = room["position"]
+    pos = room["ref_position"]
     if room["state"] == "playing":
-        pos += max(0.0, now - room["position_updated"])
+        pos += max(0.0, now - room["ref_time"])
     return max(0.0, pos)
 
 
 def _advance_seq(room):
-    """Her state değişikliğinde sıra numarasını artır (S-16)."""
+    """Sıra numarasını artır. Stale event filtrelemesi için (S-16)."""
     room["seq"] += 1
     return room["seq"]
 
 
 # ── Oda bazlı sync greenlet ───────────────────────────────────────────────────
-SYNC_INTERVAL = 0.5   # saniye (eskisi 2.0 — S-1 çözümü: daha sık, tek kaynak)
-
 def _room_sync_loop(room_id):
     """
-    Her odaya özel greenlet.
-    Oda boşalınca veya silinince otomatik durur.
-    Boş oda için CPU harcanmaz (S-13 çözümü).
+    Oda bazlı 5 Hz (200ms) sync döngüsü.
+
+    Sadece host dışındaki kullanıcılara gönderilir (S-17).
+    Oda boşalınca ya da silinince otomatik durur.
+
+    Önemli tasarım kararı:
+    ref_position + ref_time gönderilir, HESAPLANMIŞ pozisyon değil.
+    İstemci, kendi clock_offset'ini kullanarak hedef pozisyonu hesaplar.
+    Bu şekilde sunucu ve istemci birbirinden bağımsız ama tutarlı hesap yapar.
     """
     while True:
         eventlet.sleep(SYNC_INTERVAL)
         room = rooms.get(room_id)
         if not room:
-            return                      # oda silinmiş, loop biter
+            return           # oda silinmiş, loop biter
         if not room["users"]:
-            continue                    # geçici boş — host yokken bile bekle
+            continue         # geçici boş — bekle
 
-        now = time.time()               # S-9: tek time.time() çağrısı
-        pos = _current_position(room, now)
+        now      = time.time()
+        host_sid = room["users"].get(room["host"], {}).get("sid")
+
+        payload = {
+            "ref_position": room["ref_position"],
+            "ref_time":     room["ref_time"],
+            "state":        room["state"],
+            "server_time":  now,
+            "seq":          room["seq"],
+        }
 
         try:
-            # S-17: sadece non-host kullanıcılara gönder.
-            # Host kendi pozisyonunu zaten biliyor; kendine sync göndermek
-            # "paused" state'inde spurious seek tetikleyebilir.
-            host_sid = room["users"].get(room["host"], {}).get("sid")
             for uname, udata in list(room["users"].items()):
-                if udata["sid"] == host_sid:
-                    continue
-                socketio.emit("sync_global", {
-                    "position":    pos,
-                    "state":       room["state"],
-                    "server_time": now,     # S-9: pozisyon ve server_time aynı now
-                    "seq":         room["seq"],
-                }, to=udata["sid"])
-        except Exception as e:
-            print(f"[SyncLoop:{room_id}] Hata: {e}")
+                if udata["sid"] != host_sid:
+                    socketio.emit("sync_global", payload, to=udata["sid"])
+        except Exception as exc:
+            print(f"[SyncLoop:{room_id}] Hata: {exc}")
 
 
 # ── HTTP Endpoints ─────────────────────────────────────────────────────────────
@@ -128,7 +144,7 @@ def _room_sync_loop(room_id):
 @app.route("/")
 def index():
     return jsonify({
-        "service":     "FreshPlus Room Server v4",
+        "service":     "FreshPlus Room Server v5",
         "rooms":       len(rooms),
         "status":      "ok",
         "server_time": time.time(),
@@ -149,23 +165,21 @@ def create_room():
     room_id = _gen_room_id()
     now     = time.time()
     rooms[room_id] = {
-        "room_id":          room_id,
-        "title":            title,
-        "url":              url,
-        "poster":           poster,
-        "host":             host,
-        "users":            {},
-        "state":            "paused",
-        "position":         0.0,
-        "position_updated": now,
-        "messages":         [],
-        "created_at":       now,
-        "seq":              0,          # S-16: event sıra numarası
+        "room_id":      room_id,
+        "title":        title,
+        "url":          url,
+        "poster":       poster,
+        "host":         host,
+        "users":        {},
+        "state":        "paused",
+        "ref_position": 0.0,    # saniye — referans pozisyon
+        "ref_time":     now,    # unix timestamp — ref_position'ın kaydedildiği an
+        "messages":     [],
+        "created_at":   now,
+        "seq":          0,
     }
 
-    # Oda bazlı sync greenlet başlat (S-13 çözümü)
     eventlet.spawn(_room_sync_loop, room_id)
-
     print(f"[Room] Oluşturuldu: {room_id} | {title[:40]} | Host: {host}")
     return jsonify({"ok": True, "room_id": room_id, "server_time": now})
 
@@ -178,7 +192,7 @@ def get_room(room_id):
     now  = time.time()
     info = _room_info(room)
     info["server_time"] = now
-    info["position"]    = _current_position(room, now)
+    info["position"]    = _current_position(room, now)   # eski istemciler için
     return jsonify({"ok": True, "room": info})
 
 
@@ -219,10 +233,7 @@ def on_disconnect():
 
     room_id, username = sid_map.pop(sid)
     room = rooms.get(room_id)
-    if not room:
-        return
-
-    if username not in room["users"]:
+    if not room or username not in room["users"]:
         return
 
     del room["users"][username]
@@ -252,11 +263,11 @@ def on_disconnect():
     if not room["users"]:
         del rooms[room_id]
         print(f"[Room] Silindi (boş): {room_id}")
-        # Greenlet rooms.get(room_id) None görünce kendiliğinden durur
 
 
 @socketio.on("ping_time")
 def on_ping_time(data):
+    """Clock sync — istemci RTT ve offset hesaplar."""
     emit("pong_time", {
         "client_ts":   data.get("client_ts", 0),
         "server_time": time.time(),
@@ -277,7 +288,7 @@ def on_join(data):
         emit("error", {"msg": "Oda bulunamadı"})
         return
 
-    # Eski bağlantıyı temizle
+    # Stale bağlantıyı temizle (reconnect senaryosu)
     if username in room["users"]:
         old_sid = room["users"][username].get("sid")
         if old_sid and old_sid in sid_map:
@@ -294,17 +305,20 @@ def on_join(data):
     pos = _current_position(room, now)
 
     emit("joined", {
-        "room":        _room_info(room),
-        "url":         room["url"],
-        "messages":    room["messages"][-50:],
-        "is_host":     username == room["host"],
-        "position":    pos,
-        "state":       room["state"],
-        "server_time": now,
-        "seq":         room["seq"],
+        "room":         _room_info(room),
+        "url":          room["url"],
+        "messages":     room["messages"][-50:],
+        "is_host":      username == room["host"],
+        # Yeni referans nokta formatı
+        "ref_position": room["ref_position"],
+        "ref_time":     room["ref_time"],
+        # Eski istemciler için
+        "position":     pos,
+        "state":        room["state"],
+        "server_time":  now,
+        "seq":          room["seq"],
     })
 
-    # Diğer kullanıcılara bildir
     socketio.emit("user_joined", {
         "username":    username,
         "users":       list(room["users"].keys()),
@@ -325,17 +339,22 @@ def on_play(data):
     if not _check_spam(sid, "play"):
         return
 
-    now  = time.time()
-    pos  = float(data.get("position", _current_position(room, now)))
-    seq  = _advance_seq(room)
+    now = time.time()
+    pos = float(data.get("position", _current_position(room, now)))
+    seq = _advance_seq(room)
 
-    room["state"]            = "playing"
-    room["position"]         = pos
-    room["position_updated"] = now
+    # Referans noktasını güncelle
+    room["state"]        = "playing"
+    room["ref_position"] = pos
+    room["ref_time"]     = now
 
-    # S-17: host'u dahil etme (skip_sid), izleyicilere anında gönder
     host_sid = room["users"].get(username, {}).get("sid")
-    payload  = {"position": pos, "by": username, "server_time": now, "seq": seq}
+    payload  = {
+        "ref_position": pos,
+        "ref_time":     now,
+        "server_time":  now,
+        "seq":          seq,
+    }
     socketio.emit("play", payload, to=room_id, skip_sid=host_sid)
     print(f"[Sync] PLAY @{pos:.2f}s | seq={seq} | Oda: {room_id}")
 
@@ -352,16 +371,21 @@ def on_pause(data):
     if not _check_spam(sid, "pause"):
         return
 
-    now  = time.time()
-    pos  = float(data.get("position", _current_position(room, now)))
-    seq  = _advance_seq(room)
+    now = time.time()
+    pos = float(data.get("position", _current_position(room, now)))
+    seq = _advance_seq(room)
 
-    room["state"]            = "paused"
-    room["position"]         = pos
-    room["position_updated"] = now
+    room["state"]        = "paused"
+    room["ref_position"] = pos
+    room["ref_time"]     = now
 
     host_sid = room["users"].get(username, {}).get("sid")
-    payload  = {"position": pos, "by": username, "server_time": now, "seq": seq}
+    payload  = {
+        "ref_position": pos,
+        "ref_time":     now,
+        "server_time":  now,
+        "seq":          seq,
+    }
     socketio.emit("pause", payload, to=room_id, skip_sid=host_sid)
     print(f"[Sync] PAUSE @{pos:.2f}s | seq={seq} | Oda: {room_id}")
 
@@ -378,37 +402,57 @@ def on_seek(data):
     if not _check_spam(sid, "seek"):
         return
 
-    now  = time.time()
-    pos  = float(data.get("position", 0))
-    seq  = _advance_seq(room)
+    now = time.time()
+    pos = float(data.get("position", 0.0))
+    seq = _advance_seq(room)
 
-    room["position"]         = pos
-    room["position_updated"] = now
-    # state değişmez, sadece pozisyon sıfırlanır
+    # Seek sadece pozisyonu sıfırlar, state değişmez
+    room["ref_position"] = pos
+    room["ref_time"]     = now
 
     host_sid = room["users"].get(username, {}).get("sid")
     payload  = {
-        "position":    pos,
-        "by":          username,
-        "server_time": now,
-        "state":       room["state"],
-        "seq":         seq,
+        "ref_position": pos,
+        "ref_time":     now,
+        "state":        room["state"],
+        "server_time":  now,
+        "seq":          seq,
     }
     socketio.emit("seek", payload, to=room_id, skip_sid=host_sid)
     print(f"[Sync] SEEK @{pos:.2f}s | seq={seq} | state={room['state']} | Oda: {room_id}")
 
 
-# sync_position KALDIRILDI (S-1 ve S-13 çözümü).
-# Host pozisyon push'u yoktu; sync_global (500ms, sunucu) tek kaynak.
+@socketio.on("position_heartbeat")
+def on_position_heartbeat(data):
+    """
+    Host oynatırken 2 saniyede bir gerçek pozisyonu gönderir.
+    Sunucunun ref_position tahminini düzeltir — uzun süreli drift'i önler.
+    Sadece playing state'inde anlamlı.
+    """
+    sid = request.sid
+    if sid not in sid_map:
+        return
+    if not _check_spam(sid, "position_heartbeat"):
+        return
+
+    room_id, username = sid_map[sid]
+    room = rooms.get(room_id)
+    if not room or username != room["host"]:
+        return
+    if room["state"] != "playing":
+        return
+
+    now = time.time()
+    pos = float(data.get("position", 0.0))
+
+    # Referans noktasını yenile — hesap hatası birikmesini önler
+    room["ref_position"] = pos
+    room["ref_time"]     = now
 
 
 @socketio.on("request_sync")
 def on_request_sync(data):
-    """
-    Reconnect sonrası izleyici joined event üzerinden initial state alır.
-    Bu handler geriye dönük uyumluluk için kalıyor ama artık
-    joined üzerinden gelen verilerle sync_global yeterli.
-    """
+    """Reconnect sonrası istemci bu event ile anlık durumu ister."""
     sid = request.sid
     if sid not in sid_map:
         return
@@ -418,12 +462,12 @@ def on_request_sync(data):
         return
 
     now = time.time()
-    pos = _current_position(room, now)
     emit("sync_global", {
-        "position":    pos,
-        "state":       room["state"],
-        "server_time": now,
-        "seq":         room["seq"],
+        "ref_position": room["ref_position"],
+        "ref_time":     room["ref_time"],
+        "state":        room["state"],
+        "server_time":  now,
+        "seq":          room["seq"],
     })
 
 
@@ -457,8 +501,8 @@ def on_chat(data):
     if not text or len(text) > 500:
         return
 
-    now = datetime.now().strftime("%H:%M")
-    msg = {"user": username, "text": text, "time": now}
+    now_str = datetime.now().strftime("%H:%M")
+    msg     = {"user": username, "text": text, "time": now_str}
     room["messages"].append(msg)
     if len(room["messages"]) > 200:
         room["messages"] = room["messages"][-200:]
@@ -487,5 +531,5 @@ def on_poke(data):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"FreshPlus Room Server v4 -> port {port}")
+    print(f"FreshPlus Room Server v5 -> port {port}")
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
